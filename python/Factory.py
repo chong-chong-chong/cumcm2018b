@@ -65,7 +65,7 @@ class RGV:
     def __str__(self):
         row = ["\t \t","\t \t","\t \t","\t \t"]
         if self.Destination==self.Location:
-            row[self.Destination] = "[\t·\t]"
+            row[self.Destination] = "[\trgv\t]"
         else:
             row[self.Destination] = "\t=> \t"
             row[self.Location] = "\trgv\t"
