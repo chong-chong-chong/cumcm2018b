@@ -1,5 +1,7 @@
-import sys
-sys.setrecursionlimit(100000)
+import time
+
+time_start=time.time()
+
 class workpiece:
     ID = 0
     stage = 0
@@ -23,12 +25,20 @@ class CNC:
     working = False
     restTime = 0
     workingTime = 0
+    goingToStop = False
+    on = True
 
     def __init__(self,mechNum,tool,workingTime):
         self.mechNum = mechNum
         self.state = 0
         self.tool = tool
         self.workingTime = workingTime[tool]
+
+    def off(self):
+        self.on = False
+
+    def exit(self):
+        self.goingToStop = True
 
     def timeGoes(self,timeSpan):
         if not(self.working):
@@ -39,7 +49,6 @@ class CNC:
         else:
             self.restTime = 0
             self.working = False #完成
-            #进入下一阶段
             self.workpieceOn.NextStage()
 
     def __str__(self):
@@ -71,7 +80,7 @@ class RGV:
     Destination = 0
     startedNum = 1 #已经投入的工件数目
     finishedNum = 0 #已经成功完成的工件数目
-
+    goingToStop = False
     def __init__(self,**timeArgs):
         self.Location = 0
         self.moveTime = timeArgs['moveTime']
@@ -79,48 +88,59 @@ class RGV:
         self.cleanTime = timeArgs['cleanTime']
         self.workpieceOn = workpiece(1)
         self.startedNum = 1
+        self.finishedNum = 0
+        self.goingToStop = False
 
-    
+    def exit(self):
+        self.goingToStop = True
+
     def moveTo(self,Destination):
         self.Location = Destination
 
-    def loadTo(self,cnc):
-        #给CNC安装工件
-        cnc.workpieceOn = self.workpieceOn
-        #拾取新工件
+    def getNewWorkpiece(self):
         self.startedNum += 1
-        self.workpieceOn = workpiece(self.startedNum)
-        #重新上钟!
-        cnc.working = True
-        cnc.restTime = cnc.workingTime
+        nwp = workpiece(self.startedNum)
+        self.workpieceOn = nwp
+        return nwp
     
     def reloadTo(self,cnc):
-        self.startedNum += 1
-        #抓取新工件
-        newWorkpiece = workpiece(self.startedNum)
-        #上老工件给CNC
+        #抓取完成的工件
+        workpieceFinished = cnc.workpieceOn
+        #上本地工件给CNC
         cnc.workpieceOn = self.workpieceOn
         #更新
-        self.workpieceOn = newWorkpiece
-        #重新上钟!
-        cnc.working = True
-        cnc.restTime = cnc.workingTime
-        
-
+        self.workpieceOn = workpieceFinished
+        #换上去了什么?
+        if cnc.workpieceOn == None:
+            pass     
+        else:
+            #重新上钟!
+            cnc.working = True
+            cnc.restTime = cnc.workingTime
+    
     def clean(self):
         self.finishedNum += 1
-        self.workpieceOn.NextStage()
+        #self.workpieceOn.NextStage
+        #如果要下班,拒绝上料
+        
 
     def __str__(self):
-        info = self.workpieceOn.ID.__str__()+"<"+self.workpieceOn.stage.__str__()+">"
+        tab = "\t"
+        if self.workpieceOn == None:
+            ID = " "
+            Stage = " "
+        else:
+            ID = self.workpieceOn.ID.__str__()
+            Stage = self.workpieceOn.stage.__str__()
+        info = "<"+tab+Stage+tab+">"
         row = ["\t \t","\t \t","\t \t","\t \t"]
         if self.Destination==self.Location:
-            row[self.Destination] = "[\t"+info+"\t]"
+            row[self.Destination] = "["+info+"]"
         else:
             row[self.Destination] = "\t=> \t"
-            row[self.Location] = "\t"+info+"\t"
+            row[self.Location] = info
         
-        tab = "\t"
+        
         return row[0] + tab + row[1] + tab + row[2] + tab + row[3]
 
     
@@ -139,15 +159,19 @@ class streamline:
 
     3.  对于有两道工序的任务,如果我们取了CNC_list_tool1,waitingList = CNC_list_tool2,不清洗
         如果我们取了CNC_list_tool2,清洗,waitingList = CNC_list_tool1
+
+    4.  如何退出工艺：
+        我们希望在下班之前，小车位于原位，并且所有的零件都已经加工完
+        当我们取一个新件时，
     '''
     #rgv = RGV()
     CNC_list = {}
-    CNC_list_tool1 = []
-    CNC_list_tool2 = []
     time = 0
-    CNCserving = []
     rgv = None
     info = ""
+    goingToStop = False
+    CNC_list_on = {1,2,3,4,5,6,7,8}
+    CNC_list_have = {1,2,3,4,5,6,7,8}
     def __init__(self,tools,**timeArgs):
         '''
         格式:
@@ -155,6 +179,8 @@ class streamline:
         '''
         self.rgv = RGV(moveTime = timeArgs['moveTime'],reloadTime = timeArgs['reloadTime'],cleanTime = timeArgs['cleanTime'])
         self.CNC_list = {}
+        self.CNC_list_tool1 = []
+        self.CNC_list_tool2 = []
         for mechNum in range(1,9):
             self.CNC_list[mechNum] = CNC(mechNum,tools[mechNum],timeArgs['workingTime'])
         #装载刀具
@@ -169,86 +195,81 @@ class streamline:
             
         self.time = 0
         self.info = ""
+        self.goingToStop = False
+
+    def exit(self):
+        self.goingToStop = True
+        self.rgv.exit()
+        for mechNum in self.CNC_list:
+            self.CNC_list[mechNum].exit()
 
     def CNCtimeGoes(self,timeSpan):
         for mechNum in range(1,9):
             self.CNC_list[mechNum].timeGoes(timeSpan)
 
     def nextActionGroup(self):
-        if self.time>27200:
-            print("Finished",self.rgv.finishedNum)
-            return
-        #生料 阶段0 进入tool1
-        if self.rgv.workpieceOn.stage==0:
-            
-            min_Time = 27200
-            #寻找目的地
-            for mechNum in self.CNC_list_tool1:
-                cnc = self.CNC_list[mechNum]
-                taskTime = max(self.rgv.moveTime[abs((mechNum-1)//2-self.rgv.Location)] , cnc.restTime ) \
-                            + self.rgv.reloadTime[mechNum]
-                if min_Time>taskTime:
-                    min_Time = taskTime
-                    min_mechNum = mechNum
-            
-            aimCNC = self.CNC_list[min_mechNum]
-            aimLocation = (min_mechNum-1)//2
-            #确定目的地
-            self.rgv.Destination = aimLocation
-            #添加记录
-            self.info += self.show()
-            #移动
-            self.rgv.moveTo(aimLocation)
-
-            #如果目标CNC是空的,loadTo()
-            if aimCNC.workpieceOn == None:
-                #加载
-                self.rgv.loadTo(aimCNC)
-                #完事
-                
-            #如果不是空的,reloadTo()
+        #八小时以后收工
+        if not(self.goingToStop) and self.time>25400:
+            self.exit()
+        
+        #搜索所有CNC,如果找到待取的CNC
+        for mechNum in self.CNC_list:
+            if not(self.CNC_list[mechNum].workpieceOn==None):
+                self.CNC_list_have.add(mechNum)
             else:
-                self.rgv.reloadTo(aimCNC)
+                self.CNC_list_have.discard(mechNum)
+        if len(self.CNC_list_have) == 0 and self.goingToStop:
+            return
 
+        #无新料,退出,等待所有开着的CNC
+        if self.rgv.workpieceOn == None:
+            waitingList = self.CNC_list_have
+        #生料 阶段0 进入tool1
+        elif self.rgv.workpieceOn.stage==0:
+            waitingList = self.CNC_list_tool1
         #阶段1,送入tool2
         elif self.rgv.workpieceOn.stage==1:
-            min_Time = 27200
-            for mechNum in self.CNC_list_tool2:
-                cnc = self.CNC_list[mechNum]
-                taskTime = max(self.rgv.moveTime[abs((mechNum-1)//2-self.rgv.Location)] , cnc.restTime ) \
-                            + self.rgv.reloadTime[mechNum]
-                if min_Time>taskTime:
-                    min_Time = taskTime
-                    min_mechNum = mechNum
-                
+            waitingList = self.CNC_list_tool2
+        else:
+            pass
 
-            aimCNC = self.CNC_list[min_mechNum]
-            aimLocation = (min_mechNum-1)//2
-            #确定目的地
-            self.rgv.Destination = aimLocation
-            #添加记录
-            self.info += self.show()
-            #结算时间(下次RGV自由时)
-            self.CNCtimeGoes(min_Time)
-            self.time += min_Time
-            #移动
-            self.rgv.moveTo(aimLocation)
+        min_Time = 27200
+        for mechNum in waitingList:
+            cnc = self.CNC_list[mechNum]
+            taskTime = max(self.rgv.moveTime[abs((mechNum-1)//2-self.rgv.Location)] , cnc.restTime ) \
+                        + self.rgv.reloadTime[mechNum]
+            if min_Time>taskTime:
+                min_Time = taskTime
+                min_mechNum = mechNum
 
-            #如果目标CNC是空的,loadTo()
-            if aimCNC.workpieceOn == None:
-                #加载
-                self.rgv.loadTo(aimCNC)
-            #如果不是空的,reloadTo(),清洗卸下的工件
+        aimCNC = self.CNC_list[min_mechNum]
+        aimLocation = (min_mechNum-1)//2
+        #确定目的地
+        self.rgv.Destination = aimLocation
+        #添加记录
+        self.info += self.show()
+        #结算时间(下次RGV自由时)
+        self.CNCtimeGoes(min_Time)
+        self.time += min_Time
+        #移动
+        self.rgv.moveTo(aimLocation)
+        #交换 RGV 和 CNC 的工件
+        self.rgv.reloadTo(aimCNC)
+        #让我们看看我们从 CNC 上面换下来了什么?
+        if self.rgv.workpieceOn == None:
+            if not(self.rgv.goingToStop):
+                self.rgv.getNewWorkpiece()
+        elif self.rgv.workpieceOn.stage == 2:
+            #结算清洗时间
+            self.CNCtimeGoes(self.rgv.cleanTime)
+            self.time += self.rgv.cleanTime
+            if not(self.goingToStop):
+                self.rgv.getNewWorkpiece()
             else:
-                self.rgv.reloadTo(aimCNC)
-                self.rgv.clean()
-                #结算清洗时间
-                self.CNCtimeGoes(self.rgv.cleanTime)
-                self.time += self.rgv.cleanTime
-        
-        
-        
-        
+                self.rgv.workpieceOn = None
+        else:
+            pass
+    
         #下一次运动
         self.nextActionGroup()
 
@@ -270,15 +291,37 @@ class streamline:
 
 
 
+N = {}
+for i in range(1,255):
+    p = bin(i)
+    tools = {}
+    for num in range(1,9):
+        tools[num] = i%2+1
+        i = i//2
+    LineA = streamline( tools,moveTime = {0:0,1:20,2:33,3:46},\
+                                reloadTime = {1:28,3:28,5:28,7:28,2:31,4:31,6:31,8:31},\
+                                cleanTime = 25,\
+                                workingTime = {1:400,2:378})
 
-tools = {1:1,2:1,3:1,4:2,5:2,6:2,7:1,8:1}
+    LineA.start()
+    N[p] = LineA.rgv.startedNum
+key = max(N, key=N.get)
+val = N[key]
+print(key,val)
+
+'''
+tools = {1:1,2:1,3:2,4:1,5:2,6:2,7:1,8:1}
 LineA = streamline( tools,moveTime = {0:0,1:20,2:33,3:46},\
                             reloadTime = {1:28,3:28,5:28,7:28,2:31,4:31,6:31,8:31},\
                             cleanTime = 25,\
                             workingTime = {1:400,2:378})
-
 LineA.start()
 ft = open('workStream2.txt','w',encoding='utf-8')
+
 ft.write(LineA.info)
 ft.close()
 
+
+print('time cost',time_end-time_start,'s',' ',LineA.rgv.startedNum)
+'''
+time_end=time.time()
