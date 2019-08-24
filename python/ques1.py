@@ -1,6 +1,5 @@
-import time
-
-time_start=time.time()
+import random
+import math
 
 class workpiece:
     ID = 0
@@ -17,19 +16,26 @@ class CNC:
     True        加工
     False       等待上下料
     '''
-    workpieceOn = None
+    
     tool = 0
     mechNum = 1
+    workingTime = 0
+
+    workpieceOn = None
     working = False
     restTime = 0
-    workingTime = 0
+
     goingToStop = False
-    on = True
 
     def __init__(self,mechNum,workingTime):
         self.mechNum = mechNum
-        self.state = 0
         self.workingTime = workingTime
+
+    def restart(self):
+        self.workpieceOn = None
+        self.working = False
+        self.restTime = 0
+        self.goingToStop = False
 
     def off(self):
         self.on = False
@@ -71,9 +77,10 @@ class RGV:
     '''
     moveTime = {0:0,1:20,2:33,3:46}
     reloadTime = {1:20,2:33,3:46}
-    workpieceOn = workpiece(1)
     cleanTime = 25
     Location = 0
+
+    workpieceOn = workpiece(1)  
     Destination = 0
     startedNum = 1 #已经投入的工件数目
     finishedNum = 0 #已经成功完成的工件数目
@@ -86,6 +93,13 @@ class RGV:
         self.workpieceOn = workpiece(1)
         self.startedNum = 1
         self.finishedNum = 0
+        self.goingToStop = False
+
+    def restart(self):
+        self.workpieceOn = workpiece(1)  
+        self.Destination = 0
+        self.startedNum = 1 #已经投入的工件数目
+        self.finishedNum = 0 #已经成功完成的工件数目
         self.goingToStop = False
 
     def exit(self):
@@ -166,6 +180,8 @@ class streamline:
     time = 0
     rgv = None
     info = ""
+    CNC_arrival_sequence = []
+    manual_sequence = []
     goingToStop = False
     CNC_list_have = {1,2,3,4,5,6,7,8}
     def __init__(self,**timeArgs):
@@ -177,10 +193,7 @@ class streamline:
         self.CNC_list = {}
         for mechNum in range(1,9):
             self.CNC_list[mechNum] = CNC(mechNum,timeArgs['workingTime'])
-            
-        self.time = 0
-        self.info = ""
-        self.goingToStop = False
+
 
     def exit(self):
         self.goingToStop = True
@@ -192,7 +205,54 @@ class streamline:
         for mechNum in range(1,9):
             self.CNC_list[mechNum].timeGoes(timeSpan)
 
-    def nextActionGroup(self):
+    def nextManualAction(self,aimMechNum):
+        aimCNC = self.CNC_list[aimMechNum]
+        aimLocation = (aimMechNum-1)//2
+        taskTime = max(self.rgv.moveTime[abs((aimMechNum-1)//2-self.rgv.Location)] , aimCNC.restTime ) \
+                        + self.rgv.reloadTime[aimMechNum]
+        #确定目的地
+        self.rgv.Destination = aimLocation
+        #结算时间(下次RGV自由时)
+        self.CNCtimeGoes(taskTime)
+        self.time += taskTime
+        #移动
+        self.rgv.moveTo(aimLocation)
+        #交换 RGV 和 CNC 的工件
+        self.rgv.reloadTo(aimCNC)
+        #让我们看看我们从 CNC 上面换下来了什么?
+        if self.rgv.workpieceOn == None:
+            self.rgv.getNewWorkpiece()
+        elif self.rgv.workpieceOn.stage == 1:
+            #结算清洗时间
+            self.CNCtimeGoes(self.rgv.cleanTime)
+            self.time += self.rgv.cleanTime
+            self.rgv.getNewWorkpiece()
+        else:
+            pass
+
+        #下一次运动
+        if self.arrivalIndex < len(self.manual_sequence)-1:
+            nextPlace = self.manual_sequence[self.arrivalIndex]
+            self.arrivalIndex += 1
+            self.nextManualAction(nextPlace)
+        else:
+            self.time += self.rgv.moveTime[(aimMechNum-1)//2] 
+            return
+
+    def manualStart(self,manual_sequence):
+        self.time = 0
+        self.info = ""
+        self.goingToStop = False
+        self.CNC_arrival_sequence = []
+        self.manual_sequence = manual_sequence
+        self.arrivalIndex = 0
+        self.rgv.restart()
+        for mechNum in self.CNC_list:
+            self.CNC_list[mechNum].restart()
+        self.nextManualAction(manual_sequence[0])
+        return self.time
+        
+    def nextAutoActionGroup(self):
         #八小时以后收工
         if not(self.goingToStop) and self.time>25400:
             self.exit()
@@ -223,7 +283,7 @@ class streamline:
             if min_Time>taskTime:
                 min_Time = taskTime
                 min_mechNum = mechNum
-
+        self.CNC_arrival_sequence.append(min_mechNum)
         aimCNC = self.CNC_list[min_mechNum]
         aimLocation = (min_mechNum-1)//2
         #确定目的地
@@ -253,10 +313,18 @@ class streamline:
             pass
     
         #下一次运动
-        self.nextActionGroup()
+        self.nextAutoActionGroup()
 
     def start(self):
-        self.nextActionGroup()
+        self.time = 0
+        self.info = ""
+        self.goingToStop = False
+        self.CNC_arrival_sequence = []
+        self.rgv.restart()
+        for mechNum in self.CNC_list:
+            self.CNC_list[mechNum].restart()
+        self.nextAutoActionGroup()
+        return self.CNC_arrival_sequence
 
     def show(self):
         '''
@@ -271,8 +339,58 @@ class streamline:
                 + self.CNC_list[1].__str__()+tb+self.CNC_list[3].__str__()+tb+self.CNC_list[5].__str__()+tb+self.CNC_list[7].__str__()
         return '\n'+time+'\n'+text+'\n'
 
+class AnnealingMechine():
+    line = streamline( moveTime = {0:0,1:20,2:33,3:46},\
+                            reloadTime = {1:28,3:28,5:28,7:28,2:31,4:31,6:31,8:31},\
+                            cleanTime = 25,\
+                            workingTime = 560)
+    sequence = []
+    T = 300
+    k_max = 300
+    E_now = 0
+    def __init__(self,k_max):
+        self.k_max = k_max
+        self.line = streamline( moveTime = {0:0,1:20,2:33,3:46},\
+                            reloadTime = {1:28,3:28,5:28,7:28,2:31,4:31,6:31,8:31},\
+                            cleanTime = 25,\
+                            workingTime = 560)
+        self.sequence = self.line.start()
+        T = k_max
+        self.E_now = self.E(self.sequence)
 
+    def E(self,sequence):
+        return self.line.manualStart(sequence)
 
+    def neighbour(self):
+        L = len(self.sequence)
+        p1 = random.randint(0,L-1)
+        p2 = random.randint(0,L-1)
+        s_ = self.sequence.copy()
+        temp = s_[p1]
+        s_[p1] = s_[p2]
+        s_[p2] = temp
+        return s_
+
+    def P(self,E,E_new):
+        if E_new<E:
+            return 1
+        else:
+            return math.exp((E-E_new)/(self.T))
+
+    def anneal(self):
+        for k in range(0,self.k_max):
+            sequence_new = self.neighbour()
+            E_new = self.E(sequence_new)
+            if self.P(self.E_now,E_new)>random.random():
+                self.sequence = sequence_new
+                self.E_now = E_new
+                print(E_new)
+            self.T = self.k_max/(1+k)
+                
+AM = AnnealingMechine(1000)
+AM.anneal()
+            
+'''
 
 LineA = streamline( moveTime = {0:0,1:20,2:33,3:46},\
                             reloadTime = {1:28,3:28,5:28,7:28,2:31,4:31,6:31,8:31},\
@@ -286,4 +404,4 @@ ft.close()
 
 time_end=time.time()
 print('time cost',time_end-time_start,'s',' ',LineA.rgv.startedNum)
-
+'''
