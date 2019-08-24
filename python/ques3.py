@@ -1,13 +1,15 @@
 import time
-
+import random
 time_start=time.time()
 
 class workpiece:
     ID = 0
     stage = 0
+
     def __init__(self,ID):
         self.ID = ID
         self.stage = 0
+
     def NextStage(self):
         self.stage += 1
 
@@ -19,17 +21,24 @@ class CNC:
     '''
     workpieceOn = None
     tool = 0
+    breakTime = 0
+    repaireTime = 0
     mechNum = 1
     working = False
     restTime = 0
     workingTime = 0
     goingToStop = False
+    isBroken = False
     on = True
 
-    def __init__(self,mechNum,workingTime):
+    def __init__(self,mechNum,tool,workingTime):
         self.mechNum = mechNum
         self.state = 0
-        self.workingTime = workingTime
+        self.tool = tool
+        self.workingTime = workingTime[tool]
+        self.isBroken = False
+        self.breakTime = 0
+        self.repaireTime = 0
 
     def off(self):
         self.on = False
@@ -46,7 +55,11 @@ class CNC:
         else:
             self.restTime = 0
             self.working = False #完成
-            self.workpieceOn.NextStage()
+            if not(self.isBroken): 
+                self.workpieceOn.NextStage()
+            else:
+                self.isBroken = False 
+                self.workpieceOn = None
 
     def __str__(self):
         if self.tool==1:
@@ -60,6 +73,7 @@ class CNC:
             return lb+tab+self.restTime.__str__()+tab+rb
         else:
             return lb+tab+tab+rb
+
 
 class RGV:
     '''
@@ -95,7 +109,7 @@ class RGV:
         self.Location = Destination
 
     def getNewWorkpiece(self):
-        self.startedNum += 1            #投入的工件数
+        self.startedNum += 1
         nwp = workpiece(self.startedNum)
         self.workpieceOn = nwp
         return nwp
@@ -112,8 +126,17 @@ class RGV:
             pass     
         else:
             #重新上钟!
-            cnc.working = True
-            cnc.restTime = cnc.workingTime
+            num = random.randint(1,100)
+            if num == 1:
+                #print(num)
+                cnc.isBroken = True
+                cnc.breakTime = random.randint(0,cnc.workingTime)
+                cnc.repaireTime = random.randint(600,1200)
+                restTime = cnc.breakTime +cnc.repaireTime
+
+            else:
+                cnc.working = True
+                cnc.restTime = cnc.workingTime
     
     def clean(self):
         self.finishedNum += 1
@@ -141,7 +164,7 @@ class RGV:
         return row[0] + tab + row[1] + tab + row[2] + tab + row[3]
 
     
-class streamline:
+class streamline:      #加工线，加工流程
     '''
     以RGV的动作分段
     机器在完成这个动作后,下一个动作是什么?
@@ -166,22 +189,36 @@ class streamline:
     time = 0
     rgv = None
     info = ""
-    goingToStop = False
-    CNC_list_have = {1,2,3,4,5,6,7,8}
-    def __init__(self,**timeArgs):
+    goingToStop = False             #不停
+    CNC_list_on = {1,2,3,4,5,6,7,8}
+    CNC_list_have = {1,2,3,4,5,6,7,8}       #8个CNC
+    def __init__(self,tools,**timeArgs):
         '''
         格式:
         tools = {1:1,2:1,3:1,4:1,5:1,6:2,7:2,8:2}
         '''
+         # 传入移动时间，装载时间，清洗时间
         self.rgv = RGV(moveTime = timeArgs['moveTime'],reloadTime = timeArgs['reloadTime'],cleanTime = timeArgs['cleanTime'])
         self.CNC_list = {}
+        self.CNC_list_tool1 = []    #第一道工序的CNC
+        self.CNC_list_tool2 = []    #第二道工序的CNC
         for mechNum in range(1,9):
-            self.CNC_list[mechNum] = CNC(mechNum,timeArgs['workingTime'])
-            
+            self.CNC_list[mechNum] = CNC(mechNum,tools[mechNum],timeArgs['workingTime'])
+        #装载刀具
+        for mechNum in tools:
+            if tools[mechNum] == 1:
+                self.CNC_list_tool1.append(mechNum)     #刀具1的CNC 
+            elif tools[mechNum] == 2:
+                self.CNC_list_tool2.append(mechNum)     #刀具2的CNC
+            else:
+                print("WARING : Wrong Tool Number!!!")
+                return
+        # 初始时间为0，没有停止命令（时间未到）
         self.time = 0
         self.info = ""
         self.goingToStop = False
 
+    #退出函数，
     def exit(self):
         self.goingToStop = True
         self.rgv.exit()
@@ -197,7 +234,7 @@ class streamline:
         if not(self.goingToStop) and self.time>25400:
             self.exit()
         
-        #搜索所有CNC,如果找到待取的CNC
+        #搜索所有CNC,如果找到待取的CNC,得到有料的cnc
         for mechNum in self.CNC_list:
             if not(self.CNC_list[mechNum].workpieceOn==None):
                 self.CNC_list_have.add(mechNum)
@@ -211,10 +248,13 @@ class streamline:
             waitingList = self.CNC_list_have
         #生料 阶段0 进入tool1
         elif self.rgv.workpieceOn.stage==0:
-            waitingList = [1,2,3,4,5,6,7,8]
+            waitingList = self.CNC_list_tool1
+        #阶段1,送入tool2
+        elif self.rgv.workpieceOn.stage==1:
+            waitingList = self.CNC_list_tool2
         else:
             pass
-
+ 
         min_Time = 27200
         for mechNum in waitingList:
             cnc = self.CNC_list[mechNum]
@@ -230,7 +270,7 @@ class streamline:
         self.rgv.Destination = aimLocation
         #添加记录
         self.info += self.show()
-        #结算时间(下次RGV自由时)
+        #结算时间(下次RGV自由时) 下一个CNC上料的时间
         self.CNCtimeGoes(min_Time)
         self.time += min_Time
         #移动
@@ -241,8 +281,9 @@ class streamline:
         if self.rgv.workpieceOn == None:
             if not(self.rgv.goingToStop):
                 self.rgv.getNewWorkpiece()
-        elif self.rgv.workpieceOn.stage == 1:
+        elif self.rgv.workpieceOn.stage == 2:
             #结算清洗时间
+            self.rgv.clean()
             self.CNCtimeGoes(self.rgv.cleanTime)
             self.time += self.rgv.cleanTime
             if not(self.goingToStop):
@@ -251,7 +292,7 @@ class streamline:
                 self.rgv.workpieceOn = None
         else:
             pass
-    
+
         #下一次运动
         self.nextActionGroup()
 
@@ -273,17 +314,37 @@ class streamline:
 
 
 
+N = {}
+for i in range(1,255):
+    p = bin(i)
+    tools = {}
+    for num in range(1,9):
+        tools[num] = i%2+1
+        i = i//2
+    LineA = streamline( tools,moveTime = {0:0,1:20,2:33,3:46},\
+                                reloadTime = {1:28,3:28,5:28,7:28,2:31,4:31,6:31,8:31},\
+                                cleanTime = 25,\
+                                workingTime = {1:400,2:378})
 
-LineA = streamline( moveTime = {0:0,1:20,2:33,3:46},\
+    LineA.start()
+    N[p] = LineA.rgv.finishedNum
+key = max(N, key=N.get)
+val = N[key]
+print(key,val)
+
+'''
+tools = {1:1,2:1,3:2,4:1,5:2,6:2,7:1,8:1}
+LineA = streamline( tools,moveTime = {0:0,1:20,2:33,3:46},\
                             reloadTime = {1:28,3:28,5:28,7:28,2:31,4:31,6:31,8:31},\
                             cleanTime = 25,\
-                            workingTime = 560)
+                            workingTime = {1:400,2:378})
 LineA.start()
-ft = open('workStream.txt','w',encoding='utf-8')
+ft = open('workStream2.txt','w',encoding='utf-8')
 
 ft.write(LineA.info)
 ft.close()
 
-time_end=time.time()
-print('time cost',time_end-time_start,'s',' ',LineA.rgv.startedNum)
 
+print('time cost',time_end-time_start,'s',' ',LineA.rgv.startedNum)
+'''
+time_end=time.time()
